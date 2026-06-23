@@ -7,11 +7,13 @@ import simulacao as sim          # nossa física do Passo 2
 import pandas as pd
 import io
 from PIL import Image
+import imageio.v2 as imageio
+import tempfile, os
 from matplotlib.colors import LinearSegmentedColormap
 
 st.set_page_config(page_title="Escoamento Laminar 2D", page_icon="💧", layout="wide")
+
 st.title("💧 Simulador de Escoamento Laminar 2D - Dispersão de Poluentes")
-st.caption("Advecção–difusão 2D num aquário · diferenças finitas")
 
 # "Memória" da sessão: guarda resultados entre uma interação e outra
 ss = st.session_state
@@ -101,53 +103,19 @@ with tab3:
         J = ss.get("J", 50.0)
         opc = {"∂p/∂n = 0 (impermeável)": "neumann", "p = 0 (Dirichlet)": "zero"}
         with st.expander("Como o campo de pressão é resolvido", expanded=True):
-            st.markdown(
-                "O escoamento é tratado como **potencial**, de modo que a pressão "
-                "satisfaz a **equação de Laplace** — regime estacionário, sem fontes "
-                "internas no domínio:"
-            )
-            st.latex(r"\nabla^2 p \;=\; \frac{\partial^2 p}{\partial x^2} "
-                     r"+ \frac{\partial^2 p}{\partial y^2} \;=\; 0")
 
-            st.markdown(
-                "Como não há solução analítica para esta geometria (paredes mistas "
-                "e furo de saída), resolvemos numericamente. Cada derivada segunda é "
-                "aproximada por **diferenças finitas centrais de 2ª ordem** sobre a malha. "
-                "Com $\\Delta x = \\Delta y$, isso leva ao **estêncil de 5 pontos**, "
-                "válido em cada nó interior:"
-            )
-            st.latex(r"p_{i+1,j} + p_{i-1,j} + p_{i,j+1} + p_{i,j-1} - 4\,p_{i,j} = 0")
-            st.markdown("ou seja, a pressão em cada ponto é a **média dos quatro vizinhos**.")
-
-            st.markdown(
-                "Aplicando essa relação a todos os "
-                "$N = \\text{pontosX} \\times \\text{pontosY}$ nós, e impondo as "
-                "condições de contorno em cada parede, obtemos um **sistema linear** "
-                "de $N$ equações e $N$ incógnitas, escrito na forma matricial:"
-            )
-            st.latex(r"A\,\mathbf{p} = \mathbf{b}")
-            st.markdown(
-                "em que $\\mathbf{p}$ reúne as pressões desconhecidas, $A$ os "
-                "coeficientes do estêncil e $\\mathbf{b}$ os termos das condições de contorno."
-            )
-
-            st.markdown(
-                "A matriz $A$ é **esparsa**: cada linha tem no máximo 5 coeficientes "
-                "não nulos (o nó e seus vizinhos) — todo o resto é zero. Armazená-la "
-                "nesse formato é o que torna o problema tratável: na malha recomendada "
-                "($480\\times160$), $A$ densa teria cerca de **5,9 bilhões** de elementos, "
-                "mas apenas algumas centenas de milhares são não nulos."
-            )
-            st.markdown(
-                "O sistema é resolvido pela função **`spsolve`** do SciPy — um **solver "
-                "direto para matrizes esparsas**. Ele fatora $A$ e obtém a solução exata "
-                "de $\\mathbf{p}$ em uma única chamada, **sem iteração nem critério de "
-                "convergência**, ao contrário de métodos como o Gauss-Seidel."
-            )
-        st.markdown("**Condições de contorno**")
-        st.caption("A parede direita é fixa: furo com ∂p/∂n = −J, resto ∂p/∂n = 0. "
-                   "A esquerda nunca tem furo.")
-
+            st.markdown(r"O campo de pressão satisfaz a **equação de Laplace**:")
+            st.latex(r"\nabla^2 p = \frac{\partial^2 p}{\partial x^2} + "
+                    r"\frac{\partial^2 p}{\partial y^2} = 0")
+            st.markdown(r"As derivadas segundas são aproximadas por **diferenças "
+                        r"centrais de 2ª ordem** em cada direção:")
+            st.latex(r"\frac{\partial^2 p}{\partial x^2}(i,j) \approx "
+                    r"\frac{p_{i,j+1} - 2p_{i,j} + p_{i,j-1}}{h^2}, \qquad "
+                    r"\frac{\partial^2 p}{\partial y^2}(i,j) \approx "
+                    r"\frac{p_{i+1,j} - 2p_{i,j} + p_{i-1,j}}{h^2}")
+            st.markdown(r"Substituindo na equação de Laplace e isolando $p_{i,j}$, "
+                        r"cada nó interno resulta na **média dos quatro vizinhos**:")
+            st.latex(r"p_{i,j} = \frac{p_{i+1,j} + p_{i-1,j} + p_{i,j+1} + p_{i,j-1}}{4}")
         cc1, cc2, cc3 = st.columns(3)
         be = opc[cc1.selectbox("Parede esquerda", list(opc), index=1)]  # default p=0
         bs = opc[cc2.selectbox("Parede superior", list(opc), index=0)]  # default neumann
@@ -205,7 +173,11 @@ with tab4:
         m = ss.malha
         p = ss.pressao["p"]
         bordas_cm = [30, 35, 40, 45, 50, 55]
-        defaults  = [0.28, 0.37, 0.43, 0.49, 0.69]   # uma velocidade por trecho
+        defaults  = [0.28, 0.37, 0.43, 0.49, 0.69]
+
+        st.markdown("Informe a velocidade **medida no experimento** em cada trecho de "
+                    "5 cm. O app ajusta automaticamente o **Z** que faz o modelo chegar "
+                    "mais perto dessas medidas.")
 
         st.markdown("**Velocidades experimentais por trecho (cm/s)**")
         cols = st.columns(len(defaults))
@@ -214,31 +186,54 @@ with tab4:
             vel_exp.append(
                 c.number_input(f"{a}–{b} cm", min_value=0.0, value=d,
                                step=0.01, format="%.2f", key=f"vexp_{a}_{b}"))
+        st.caption("Cada campo é a velocidade média do escoamento naquele intervalo de x.")
 
         Z, amostras, vcal, rmse, perfil_x, perfil_v = sim.calibrar_Z(
             p, m["hx"], m["hy"], bordas_cm, vel_exp)
-        ss.Z = Z   # guarda para a etapa do campo de velocidade
+        ss.Z = Z
 
-        c1, c2 = st.columns(2)
-        c1.metric("Z ótimo", f"{Z:.4f}")
-        c2.metric("Erro quadrático médio (RMSE)", f"{rmse:.4f} cm/s")
+        st.markdown("")  # respiro
+        col_z, col_e = st.columns(2)
+        with col_z:
+            st.markdown(
+                f"""
+                <div style="background:#0e1117;border:1px solid #16a34a;
+                            border-left:6px solid #16a34a;border-radius:10px;padding:14px 18px;">
+                    <div style="color:#86efac;font-size:.72rem;text-transform:uppercase;
+                                letter-spacing:.12em;font-weight:600;">Z calibrado (ótimo)</div>
+                    <div style="color:#fff;font-size:2rem;font-weight:700;line-height:1.1;">{Z:.4f}</div>
+                    <div style="color:#9aa6b2;font-size:.75rem;margin-top:4px;">
+                        valor que melhor reproduz as velocidades medidas</div>
+                </div>
+                """, unsafe_allow_html=True)
+        with col_e:
+            st.markdown(
+                f"""
+                <div style="background:#0e1117;border:1px solid #333;
+                            border-left:6px solid #ffa726;border-radius:10px;padding:14px 18px;">
+                    <div style="color:#ffd9a6;font-size:.72rem;text-transform:uppercase;
+                                letter-spacing:.12em;font-weight:600;">Erro médio (RMSE)</div>
+                    <div style="color:#fff;font-size:2rem;font-weight:700;line-height:1.1;">
+                        {rmse:.4f} <span style="font-size:1rem;color:#9aa6b2;">cm/s</span></div>
+                    <div style="color:#9aa6b2;font-size:.75rem;margin-top:4px;">
+                        distância média modelo × experimento · menor = melhor</div>
+                </div>
+                """, unsafe_allow_html=True)
 
+        st.markdown("")  # respiro
         meios = [(a + b) / 2 for a, b in zip(bordas_cm[:-1], bordas_cm[1:])]
-
         fig, ax = plt.subplots(figsize=(9, 4))
         fig.patch.set_facecolor("#0e1117"); ax.set_facecolor("#0e1117")
-        ax.plot(meios, vel_exp, "o-", color="#4da6ff", lw=2, ms=7,
-                label="Experimento")
+        ax.plot(meios, vel_exp, "o-", color="#4da6ff", lw=2, ms=7, label="Experimento")
         ax.plot(meios, vcal, "s--", color="#ffa726", lw=2, ms=7,
                 label=f"Modelo calibrado (Z = {Z:.3f})")
         ax.set_xticks(bordas_cm)
         ax.set_xlabel("x (cm)", color="gray"); ax.set_ylabel("Velocidade (cm/s)", color="gray")
         ax.set_title("Calibração de Z pelas velocidades experimentais", color="white")
         ax.tick_params(colors="gray"); ax.grid(alpha=0.15, ls="--")
-        ax.legend(fontsize=9, facecolor="#fff", edgecolor="#333", loc="upper left")
+        ax.legend(fontsize=9, facecolor="#1a1a1a", edgecolor="#333", labelcolor="white", loc="upper left")
         for s in ax.spines.values(): s.set_edgecolor("#333")
         fig.tight_layout(); st.pyplot(fig)
-
 
 with tab5:
     st.subheader("Etapa 5 — Campo de velocidade")
@@ -248,58 +243,62 @@ with tab5:
     elif "Z" not in ss:
         st.info("Calibre o Z na Etapa 4 primeiro.")
     else:
-        st.markdown("#### 6.1 Componentes da velocidade")
-        st.markdown(
-            "Tratando o escoamento como **potencial**, a velocidade é o gradiente "
-            "(negativo) da pressão, escalado pela condutividade $Z$ calibrada:"
-        )
-        st.latex(r"\vec{v} = -\,Z\,\nabla p")
-        st.markdown("O gradiente de pressão é decomposto nas direções $x$ e $y$:")
-        st.latex(r"v_x = -Z\,\frac{\partial p}{\partial x}, \qquad "
-                 r"v_y = -Z\,\frac{\partial p}{\partial y}")
-        st.markdown("Assim, basta calcular numericamente as derivadas parciais da "
-                    "pressão em cada direção.")
-
-        st.markdown("#### 6.2 Aproximação das derivadas — diferenças centrais")
-        st.markdown(
-            "Para obter $\\frac{\\partial p}{\\partial x}$ e "
-            "$\\frac{\\partial p}{\\partial y}$ usamos **diferenças centrais de "
-            "2ª ordem**, que dão boa precisão e são simétricas em relação ao ponto "
-            "central. A derivada em $x$ é aproximada por:"
-        )
-        st.latex(r"\frac{\partial p}{\partial x}(i,j) \approx "
-                 r"\frac{p_{i,j+1} - p_{i,j-1}}{2h}")
-        st.markdown("e a derivada em $y$ por:")
-        st.latex(r"\frac{\partial p}{\partial y}(i,j) \approx "
-                 r"\frac{p_{i+1,j} - p_{i-1,j}}{2h}")
-        st.markdown("Substituindo essas expressões, obtemos as fórmulas discretas "
-                    "das componentes da velocidade:")
-        st.latex(r"v_x(i,j) \approx -Z\,\frac{p_{i,j+1} - p_{i,j-1}}{2h}")
-        st.latex(r"v_y(i,j) \approx -Z\,\frac{p_{i+1,j} - p_{i-1,j}}{2h}")
-        st.markdown(
-            "Essas aproximações valem nos pontos **internos** da malha. Nas **bordas**, "
-            "onde não há vizinho dos dois lados, usam-se diferenças **progressivas** "
-            "(para frente) ou **regressivas** (para trás). Fisicamente, o escoamento "
-            "vai da região de maior para a de menor pressão, convergindo para o furo "
-            "de saída."
-        )
-
         m = ss.malha
         p = ss.pressao["p"]
         Z = ss.Z
+
+        # ---- Z em destaque ----
+        st.markdown(
+            f"""
+            <div style="background:#0e1117;border:1px solid #16a34a;
+                        border-left:6px solid #16a34a;border-radius:10px;
+                        padding:14px 18px;margin-bottom:16px;">
+                <div style="color:#86efac;font-size:.72rem;text-transform:uppercase;
+                            letter-spacing:.12em;font-weight:600;">
+                    Condutividade calibrada (Etapa 4)</div>
+                <div style="color:#fff;font-size:2rem;font-weight:700;line-height:1.1;">
+                    Z = {Z:.4f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ---- Formulação (compacta) ----
+        st.markdown("**Componentes da velocidade**")
+        st.markdown("Tratando o escoamento como **potencial**, a velocidade é o "
+                    "gradiente (negativo) da pressão, escalado pela condutividade "
+                    "$Z$. O gradiente é decomposto em $x$ e $y$:")
+        st.latex(r"\vec{v} = -\,Z\,\nabla p \qquad\Longrightarrow\qquad "
+                 r"v_x = -Z\,\frac{\partial p}{\partial x}, \quad "
+                 r"v_y = -Z\,\frac{\partial p}{\partial y}")
+
+        st.markdown("**Aproximação das derivadas — diferenças centrais de 2ª ordem**")
+        st.markdown("As derivadas parciais são aproximadas por diferenças centrais "
+                    "(boa precisão e simétricas em torno do ponto):")
+        st.latex(r"\frac{\partial p}{\partial x}(i,j) \approx "
+                 r"\frac{p_{i,j+1} - p_{i,j-1}}{2h} \qquad "
+                 r"\frac{\partial p}{\partial y}(i,j) \approx "
+                 r"\frac{p_{i+1,j} - p_{i-1,j}}{2h}")
+        st.markdown("Substituindo, chega-se às fórmulas discretas das componentes:")
+        st.latex(r"v_x(i,j) \approx -Z\,\frac{p_{i,j+1} - p_{i,j-1}}{2h} \qquad "
+                 r"v_y(i,j) \approx -Z\,\frac{p_{i+1,j} - p_{i-1,j}}{2h}")
+        st.caption("Nos pontos internos usam-se diferenças centrais; nas bordas, "
+                   "diferenças progressivas ou regressivas. O escoamento vai da maior "
+                   "para a menor pressão, convergindo para o furo de saída.")
+
+        st.divider()
+
         vx, vy = sim.campo_velocidade(p, Z, m["hx"], m["hy"])
         vel = np.sqrt(vx**2 + vy**2)
-        x = np.linspace(0, m["largura"], m["nx"])
-        y = np.linspace(0, m["altura"], m["ny"])
-
-        st.metric("Z usado", f"{Z:.4f}")
+        x = np.arange(m["nx"]) * m["hx"]
+        y = np.arange(m["ny"]) * m["hy"]
 
         # ---- Plot 1: linhas de corrente ----
         st.markdown("##### Linhas de corrente")
         fig, ax = plt.subplots(figsize=(10, 3.6))
         fig.patch.set_facecolor("#030303"); ax.set_facecolor("#030303")
         strm = ax.streamplot(x, y, vx, vy, color=vel, cmap="plasma",
-                             density=1.2, linewidth=1.1, arrowsize=1.1)
+                             density=1.2, linewidth=0.9, arrowsize=1.1)
         strm.lines.set_clim(0, np.percentile(vel, 98))
         cb = fig.colorbar(strm.lines, ax=ax, pad=0.01)
         cb.set_label("Velocidade (cm/s)", color="white"); cb.ax.tick_params(colors="white")
@@ -309,7 +308,6 @@ with tab5:
         for s in ax.spines.values(): s.set_edgecolor("#333")
         fig.tight_layout(); st.pyplot(fig)
 
-        # amostras nas seções
         posicoes_cm = [30, 35, 40, 45, 50, 55]
         idx = [min(int(xx / m["hx"]), m["nx"] - 1) for xx in posicoes_cm]
         v_medias = [float(vel[:, i].mean()) for i in idx]
@@ -322,8 +320,6 @@ with tab5:
             for s in ax.spines.values(): s.set_edgecolor("#333")
 
         col_a, col_b = st.columns(2)
-
-        # ---- Plot 2: velocidade no centro ----
         with col_a:
             st.markdown("##### Velocidade no centro")
             fig, ax = plt.subplots(figsize=(6, 3.2))
@@ -333,8 +329,6 @@ with tab5:
             ax.fill_between(posicoes_cm, v_centro, alpha=0.15, color="#FF6B6B")
             _estilo(ax, "Velocidade no centro (y = pontosY/2)")
             fig.tight_layout(); st.pyplot(fig)
-
-        # ---- Plot 3: velocidade média em todo y ----
         with col_b:
             st.markdown("##### Velocidade média (todo y)")
             fig, ax = plt.subplots(figsize=(6, 3.2))
@@ -345,7 +339,6 @@ with tab5:
             _estilo(ax, "Velocidade média (todo y)")
             fig.tight_layout(); st.pyplot(fig)
 
-        # ---- Plot 4: comparativo centro vs média ----
         st.markdown("##### Centro vs Média")
         fig, ax = plt.subplots(figsize=(9, 3.4))
         fig.patch.set_facecolor("#0e1117"); ax.set_facecolor("#0e1117")
@@ -361,70 +354,68 @@ with tab5:
 with tab6:
     st.subheader("Etapa 6 — Termos difusivo e advectivo")
 
-    # ===================== TERMO DIFUSIVO (só texto) =====================
-    st.markdown("### 7. Termo difusivo")
-    st.markdown("A difusão é o espalhamento do poluente das regiões de maior para as de "
-                "menor concentração. Na equação de transporte ela aparece na parcela:")
-    st.latex(r"D\,\nabla^2 u")
-    st.markdown(r"onde $u(x,y,t)$ é a concentração, $D$ o coeficiente de difusão e "
-                r"$\nabla^2 u$ o operador Laplaciano aplicado ao campo escalar.")
+    # ===================== TERMO DIFUSIVO (acordeão) =====================
+    with st.expander("Termo difusivo", expanded=False):
+        st.markdown("A difusão é o espalhamento do poluente das regiões de maior para "
+                    "as de menor concentração. Na equação de transporte ela aparece na "
+                    "parcela:")
+        st.latex(r"D\,\nabla^2 u")
+        st.markdown(r"onde $u(x,y,t)$ é a concentração, $D$ o coeficiente de difusão e "
+                    r"$\nabla^2 u$ o operador Laplaciano aplicado ao campo escalar.")
+        st.markdown("**Discretização do Laplaciano**")
+        st.markdown("Em duas dimensões, o Laplaciano é:")
+        st.latex(r"\nabla^2 u = \frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2}")
+        st.markdown("Com **diferenças centrais de 2ª ordem**:")
+        st.latex(r"\frac{\partial^2 u}{\partial x^2}(i,j) \approx \frac{u_{i,j+1} - 2u_{i,j} + u_{i,j-1}}{h^2}")
+        st.latex(r"\frac{\partial^2 u}{\partial y^2}(i,j) \approx \frac{u_{i+1,j} - 2u_{i,j} + u_{i-1,j}}{h^2}")
+        st.markdown("Somando os dois termos, chega-se à média ponderada dos vizinhos:")
+        st.latex(r"\nabla^2 u(i,j) \approx \frac{u_{i+1,j} + u_{i-1,j} + u_{i,j+1} + u_{i,j-1} - 4u_{i,j}}{h^2}")
+        st.markdown(r"A atualização no tempo usa **Euler explícito**: "
+                    r"$u^{n+1}_{i,j} = u^{n}_{i,j} + \Delta t\, D\,(\nabla^2 u)^{n}_{i,j}$. "
+                    r"Este termo é fixo — não há nada a configurar aqui.")
 
-    st.markdown("#### 7.1 Discretização do Laplaciano")
-    st.markdown("Em duas dimensões, o Laplaciano é:")
-    st.latex(r"\nabla^2 u = \frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2}")
-    st.markdown("Com **diferenças centrais de 2ª ordem**:")
-    st.latex(r"\frac{\partial^2 u}{\partial x^2}(i,j) \approx \frac{u_{i,j+1} - 2u_{i,j} + u_{i,j-1}}{h^2}")
-    st.latex(r"\frac{\partial^2 u}{\partial y^2}(i,j) \approx \frac{u_{i+1,j} - 2u_{i,j} + u_{i-1,j}}{h^2}")
-    st.markdown("Somando os dois termos, chega-se ao **estêncil de 5 pontos**:")
-    st.latex(r"\nabla^2 u(i,j) \approx \frac{u_{i+1,j} + u_{i-1,j} + u_{i,j+1} + u_{i,j-1} - 4u_{i,j}}{h^2}")
-    st.markdown(r"A atualização no tempo usa **Euler explícito**: "
-                r"$u^{n+1}_{i,j} = u^{n}_{i,j} + \Delta t\, D\,(\nabla^2 u)^{n}_{i,j}$. "
-                r"Este termo é fixo — não há nada a configurar aqui.")
+    # ===================== TERMO ADVECTIVO (acordeão) =====================
+    with st.expander("Termo advectivo", expanded=True):
+        st.markdown("O transporte pelo escoamento aparece na parcela:")
+        st.latex(r"\nabla \cdot (u\,\vec{v}) = \frac{\partial (u v_x)}{\partial x} + \frac{\partial (u v_y)}{\partial y}")
+        st.markdown("A advecção **não é simétrica**: o valor transportado depende da "
+                    "direção da velocidade. Diferenças centrais aqui gerariam oscilações "
+                    "numéricas, então usamos o esquema **upwind**, que aproxima a derivada "
+                    "sempre pelo lado de onde o fluido vem (a montante).")
 
-    st.divider()
+        st.markdown("**Escolha o esquema upwind:**")
+        ordem_label = st.radio(
+            "Ordem do upwind",
+            ["Upwind de 1ª ordem", "Upwind de 2ª ordem"],
+            index=1, horizontal=True, label_visibility="collapsed",
+        )
+        ss.ordem_upwind = 1 if "1ª" in ordem_label else 2
 
-    # ===================== TERMO ADVECTIVO (configurável) =====================
-    st.markdown("### 8. Termo advectivo")
-    st.markdown("O transporte pelo escoamento aparece na parcela:")
-    st.latex(r"\nabla \cdot (u\,\vec{v}) = \frac{\partial (u v_x)}{\partial x} + \frac{\partial (u v_y)}{\partial y}")
-    st.markdown("A advecção **não é simétrica**: o valor transportado depende da direção "
-                "da velocidade. Diferenças centrais aqui gerariam oscilações numéricas, "
-                "então usamos o esquema **upwind**, que aproxima a derivada sempre pelo "
-                "lado de onde o fluido vem (a montante).")
+        if ss.ordem_upwind == 1:
+            st.markdown(r"Derivada em $x$ (1ª ordem) — regressiva se $v_x>0$, progressiva se $v_x<0$:")
+            st.latex(r"\frac{\partial u}{\partial x} \approx "
+                     r"\begin{cases} \dfrac{u_{i,j} - u_{i,j-1}}{h}, & v_x > 0 \\[6pt] "
+                     r"\dfrac{u_{i,j+1} - u_{i,j}}{h}, & v_x < 0 \end{cases}")
+            st.markdown(r"Derivada em $y$ (1ª ordem) — regressiva se $v_y>0$, progressiva se $v_y<0$:")
+            st.latex(r"\frac{\partial u}{\partial y} \approx "
+                     r"\begin{cases} \dfrac{u_{i,j} - u_{i-1,j}}{h}, & v_y > 0 \\[6pt] "
+                     r"\dfrac{u_{i+1,j} - u_{i,j}}{h}, & v_y < 0 \end{cases}")
+            st.caption("Mais robusto e estável, porém mais difusivo (espalha um pouco a mais).")
+        else:
+            st.markdown(r"Derivada em $x$ (2ª ordem) — usa dois pontos a montante:")
+            st.latex(r"\frac{\partial u}{\partial x} \approx "
+                     r"\begin{cases} \dfrac{3u_{i,j} - 4u_{i,j-1} + u_{i,j-2}}{2h}, & v_x > 0 \\[6pt] "
+                     r"\dfrac{-3u_{i,j} + 4u_{i,j+1} - u_{i,j+2}}{2h}, & v_x < 0 \end{cases}")
+            st.markdown(r"Derivada em $y$ (2ª ordem):")
+            st.latex(r"\frac{\partial u}{\partial y} \approx "
+                     r"\begin{cases} \dfrac{3u_{i,j} - 4u_{i-1,j} + u_{i-2,j}}{2h}, & v_y > 0 \\[6pt] "
+                     r"\dfrac{-3u_{i,j} + 4u_{i+1,j} - u_{i+2,j}}{2h}, & v_y < 0 \end{cases}")
+            st.caption("Mais preciso (menos difusão numérica), mantém melhor a forma da mancha.")
 
-    st.markdown("**Escolha o esquema upwind:**")
-    ordem_label = st.radio(
-        "Ordem do upwind",
-        ["Upwind de 1ª ordem", "Upwind de 2ª ordem"],
-        index=1, horizontal=True, label_visibility="collapsed",
-    )
-    ss.ordem_upwind = 1 if "1ª" in ordem_label else 2
-
-    if ss.ordem_upwind == 1:
-        st.markdown(r"Derivada em $x$ (1ª ordem) — regressiva se $v_x>0$, progressiva se $v_x<0$:")
-        st.latex(r"\frac{\partial u}{\partial x} \approx "
-                 r"\begin{cases} \dfrac{u_{i,j} - u_{i,j-1}}{h}, & v_x > 0 \\[6pt] "
-                 r"\dfrac{u_{i,j+1} - u_{i,j}}{h}, & v_x < 0 \end{cases}")
-        st.markdown(r"Derivada em $y$ (1ª ordem) — regressiva se $v_y>0$, progressiva se $v_y<0$:")
-        st.latex(r"\frac{\partial u}{\partial y} \approx "
-                 r"\begin{cases} \dfrac{u_{i,j} - u_{i-1,j}}{h}, & v_y > 0 \\[6pt] "
-                 r"\dfrac{u_{i+1,j} - u_{i,j}}{h}, & v_y < 0 \end{cases}")
-        st.caption("Mais robusto e estável, porém mais difusivo (espalha um pouco a mais).")
-    else:
-        st.markdown(r"Derivada em $x$ (2ª ordem) — usa dois pontos a montante:")
-        st.latex(r"\frac{\partial u}{\partial x} \approx "
-                 r"\begin{cases} \dfrac{3u_{i,j} - 4u_{i,j-1} + u_{i,j-2}}{2h}, & v_x > 0 \\[6pt] "
-                 r"\dfrac{-3u_{i,j} + 4u_{i,j+1} - u_{i,j+2}}{2h}, & v_x < 0 \end{cases}")
-        st.markdown(r"Derivada em $y$ (2ª ordem):")
-        st.latex(r"\frac{\partial u}{\partial y} \approx "
-                 r"\begin{cases} \dfrac{3u_{i,j} - 4u_{i-1,j} + u_{i-2,j}}{2h}, & v_y > 0 \\[6pt] "
-                 r"\dfrac{-3u_{i,j} + 4u_{i+1,j} - u_{i+2,j}}{2h}, & v_y < 0 \end{cases}")
-        st.caption("Mais preciso (menos difusão numérica), mantém melhor a forma da mancha.")
-
-    st.markdown("O termo advectivo entra no avanço temporal como:")
-    st.latex(r"-\left( v_x\,\frac{\partial u}{\partial x} + v_y\,\frac{\partial u}{\partial y} \right)")
-    st.info(f"Esquema selecionado: **upwind de {ss.ordem_upwind}ª ordem** "
-            f"(será usado no passo de tempo da próxima etapa).")
+        st.markdown("O termo advectivo entra no avanço temporal como:")
+        st.latex(r"-\left( v_x\,\frac{\partial u}{\partial x} + v_y\,\frac{\partial u}{\partial y} \right)")
+        st.info(f"Esquema selecionado: **upwind de {ss.ordem_upwind}ª ordem** "
+                f"(será usado no passo de tempo da próxima etapa).")
     
 
 
@@ -508,15 +499,18 @@ with tab8:
         u0 = sim.condicao_inicial(m["nx"], m["ny"], X_cm, Y_cm, gotas)
         ss.u0 = u0   # guarda para o passo de tempo
 
+        oil = LinearSegmentedColormap.from_list("oleo",
+                ["#e8d49a", "#cda34a", "#9c6b2e", "#5e3a17"]).with_extremes(bad="#c6e4f5")
+        disp = np.where(u0 > 1e-9, u0, np.nan)   # onde não há óleo -> água
         fig, ax = plt.subplots(figsize=(10, 3.4))
-        im = ax.imshow(u0, cmap="magma", origin="lower", aspect="equal",
-                       extent=[0, m["largura"], 0, m["altura"]])
-        cb = plt.colorbar(im, ax=ax, pad=0.01); cb.set_label("Concentração inicial")
-        ax.set_title("Condição inicial com gotas circulares")
+        ax.set_facecolor("#c6e4f5")
+        im = ax.imshow(disp, cmap=oil, origin="lower", aspect="equal",
+                       extent=[0, m["largura"], 0, m["altura"]], vmin=0, vmax=1)
+        cb = plt.colorbar(im, ax=ax, pad=0.01); cb.set_label("Concentração")
+        ax.set_title("Gotas (concentração)")
         ax.set_xlabel("x (cm)"); ax.set_ylabel("y (cm)")
         fig.tight_layout(); st.pyplot(fig)
 
-        st.caption(f"{len(gotas)} gota(s).  A concentração é limitada a [0, 1].")
 
 with tab9:
     st.subheader("Etapa 9 — Simulação e vídeo")
@@ -532,14 +526,18 @@ with tab9:
         st.info("Antes de simular, conclua: " + ", ".join(faltam) + ".")
     else:
         m = ss.malha
+        dt = ss.dt
+        ordem = ss.ordem_upwind
+
         st.markdown("**Tempo de simulação**")
         cmin, cseg = st.columns(2)
         minutos = cmin.number_input("Minutos", 0, 60, 0, 1)
         segundos = cseg.number_input("Segundos", 0, 59, 30, 1)
         tempo_total = minutos * 60 + segundos
 
-        dt = ss.dt
-        ordem = ss.ordem_upwind
+        limiar = st.slider("Limiar de visualização", 0.0, 0.5, 0.05, 0.01,
+                           help="Concentração abaixo deste valor aparece como água (fundo azul).")
+
         steps = int(tempo_total / dt) if dt > 0 else 0
         st.caption(f"Δt = {dt:.5f} s  ·  upwind {ordem}ª ordem  ·  "
                    f"{steps} passos para {tempo_total} s de simulação.")
@@ -550,36 +548,75 @@ with tab9:
             else:
                 vx, vy = sim.campo_velocidade(ss.pressao["p"], ss.Z, m["hx"], m["hy"])
                 u = ss.u0.copy()
-                max_frames = 150
-                skip = max(1, steps // max_frames)
-                cmap = LinearSegmentedColormap.from_list("oleo",
-                    ["#000000", "#050012", "#12002b", "#240060",
-                     "#35118a", "#4b2bb3", "#6a5cff"])
+
+                fps_alvo = 25
+                skip = max(1, round(1 / (fps_alvo * dt)))
+                fps_real = 1 / (skip * dt)
+
+                oil = LinearSegmentedColormap.from_list("oleo_video",
+                    ["#e8d49a", "#cda34a", "#9c6b2e", "#5e3a17"])
+                bg_rgb = np.array([198, 228, 245], dtype="uint8")   # água
                 u_ref = max(float(u.max()), 1e-9)
 
-                frames = []
+                # faixas de medição -> colunas + cor das linhas
+                faixas_cm = [30, 35, 40, 45, 50, 55]
+                cols_faixa = [min(int(round(xc / m["hx"])), m["nx"] - 1) for xc in faixas_cm]
+                vermelho = np.array([220, 30, 30], dtype="uint8")
+
+                def _render(u):
+                    un = np.clip(u / u_ref, 0, 1) ** 0.6
+                    rgb = (oil(un)[:, :, :3] * 255).astype("uint8")
+                    rgb[u < limiar] = bg_rgb
+                    return np.flipud(rgb)
+
+                def _add_faixas(frame):
+                    f = frame.copy()
+                    tracos = (np.arange(f.shape[0]) // 6) % 2 == 0   # tracejado vertical
+                    for c in cols_faixa:
+                        f[tracos, c] = vermelho
+                        if c + 1 < f.shape[1]:
+                            f[tracos, c + 1] = vermelho              # 2px de espessura
+                    return f
+
+                frames1, frames2 = [], []
                 prog = st.progress(0.0, "Simulando...")
                 marca = max(1, steps // 100)
                 for s in range(steps + 1):
                     if s % skip == 0:
-                        un = np.clip(u / u_ref, 0, 1) ** 0.55
-                        rgb = (cmap(un)[:, :, :3] * 255).astype("uint8")
-                        frames.append(Image.fromarray(np.flipud(rgb)))
+                        fr = _render(u)
+                        frames1.append(fr)
+                        frames2.append(_add_faixas(fr))
                     if s < steps:
                         u = sim.passo_tempo(u, vx, vy, ss.D, m["hx"], m["hy"], dt, ordem)
                     if s % marca == 0:
                         prog.progress(min(s / max(steps, 1), 1.0))
                 prog.empty()
 
-                buf = io.BytesIO()
-                frames[0].save(buf, format="GIF", save_all=True,
-                               append_images=frames[1:], duration=70, loop=0)
-                ss.video_bytes = buf.getvalue()
-                ss.video_info = f"{tempo_total} s · {len(frames)} frames · upwind {ordem}ª ordem"
+                with st.spinner("Codificando os vídeos (MP4)..."):
+                    def _mp4(frames):
+                        tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                        tmp.close()
+                        imageio.mimsave(tmp.name, frames, format="FFMPEG",
+                                        fps=fps_real, codec="libx264", quality=8)
+                        with open(tmp.name, "rb") as f:
+                            data = f.read()
+                        os.remove(tmp.name)
+                        return data
+                    ss.video_bytes = _mp4(frames1)
+                    ss.video_bytes2 = _mp4(frames2)
+                ss.video_info = (f"{tempo_total} s de simulação · {len(frames1)} frames · "
+                                 f"{fps_real:.1f} fps · upwind {ordem}ª ordem")
 
         if ss.get("video_bytes"):
-            st.markdown("##### Resultado")
-            st.image(ss.video_bytes)
+            st.markdown("##### Vídeo 1 — dispersão")
+            st.video(ss.video_bytes)
             st.caption(ss.get("video_info", ""))
-            st.download_button("Baixar GIF", ss.video_bytes,
-                               "simulacao.gif", "image/gif")
+            st.download_button("Baixar MP4 (vídeo 1)", ss.video_bytes,
+                               "simulacao.mp4", "video/mp4")
+
+        if ss.get("video_bytes2"):
+            st.markdown("##### Vídeo 2 — com as faixas de medição")
+            st.video(ss.video_bytes2)
+            st.caption("Linhas pontilhadas vermelhas em x = 30, 35, 40, 45, 50 e 55 cm.")
+            st.download_button("Baixar MP4 (vídeo 2)", ss.video_bytes2,
+                               "simulacao_faixas.mp4", "video/mp4")
